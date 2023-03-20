@@ -82,7 +82,7 @@ def main(data_dir="data", save_dir="saves"):
     train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
 
     save_dir = save_dir / f"murakami_rugpt3small{'_peft' if use_peft else ''}"
-    save_dir.mkdir(exist_ok=True)
+    save_dir.mkdir(exist_ok=True, parents=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
         print([t.name for t in last_checkpoint_dir.iterdir()])
