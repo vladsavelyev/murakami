@@ -1,0 +1,8 @@
+# Ignore everything...
+*
+
+# Except these:
+!Dockerfile
+!requirements.txt
+!main.py
+!data
