@@ -8,14 +8,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from accelerate.utils import set_seed
+import fire
 
 
-drive_path = Path("/Users/vlad/googledrive")
 model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 use_peft = True
 
 
-def main():
+def main(data_path: str = "data", save_path: str = "saves"):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print(f"Model parameters: {model.num_parameters():,}")
@@ -71,16 +71,14 @@ def main():
             print(f"Dataset shape: {ids.shape}")
             return MurakamiDataset(ids, n_ctx)
 
-    test_text_path = drive_path / "AI" / "datasets" / "murakami" / "murakami_test.txt"
-    train_text_path = drive_path / "AI" / "datasets" / "murakami" / "murakami_train.txt"
+    test_text_path = data_path / "murakami_test.txt"
+    train_text_path = data_path / "murakami_train.txt"
     test_set = MurakamiDataset.load(
         test_text_path, tokenizer, model.config.n_ctx, max_n_examples=100
     )
     train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
 
-    save_dir = drive_path / (
-        "AI/pretgpt/murakami_rugpt3small" + ("_peft" if use_peft else "")
-    )
+    save_dir = save_path / "murakami_rugpt3small" + ("_peft" if use_peft else "")
     save_dir.mkdir(exist_ok=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
@@ -135,4 +133,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

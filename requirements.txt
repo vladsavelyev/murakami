@@ -9,3 +9,4 @@ peft
 accelerate
 flask
 cloudpathlib[gs]
+fire
