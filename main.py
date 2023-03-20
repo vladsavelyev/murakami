@@ -133,7 +133,7 @@ def main(data_dir="data", save_dir="saves", peft=False, deepspeed=True):
             torch_compile=True,
             # https://huggingface.co/docs/accelerate/usage_guides/memory
             auto_find_batch_size=True,
-            deepspeed=deepspeed,
+            fp16=True,
         ),
     )
     trainer.train(resume_from_checkpoint=last_checkpoint_dir)
