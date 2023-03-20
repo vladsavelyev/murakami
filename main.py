@@ -13,16 +13,15 @@ from cloudpathlib.anypath import AnyPath
 
 
 model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
-use_peft = True
 
 
-def main(data_dir="data", save_dir="saves"):
+def main(data_dir="data", save_dir="saves", peft=False, deepspeed=True):
     data_dir = AnyPath(data_dir)
     save_dir = AnyPath(save_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print(f"Model parameters: {model.num_parameters():,}")
-    if use_peft:
+    if peft:
         from peft import get_peft_model, LoraConfig, TaskType
 
         model = get_peft_model(
@@ -81,7 +80,7 @@ def main(data_dir="data", save_dir="saves"):
     )
     train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
 
-    save_dir = save_dir / f"murakami_rugpt3small{'_peft' if use_peft else ''}"
+    save_dir = save_dir / f"murakami_rugpt3small{'_peft' if peft else ''}"
     save_dir.mkdir(exist_ok=True, parents=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
@@ -116,6 +115,10 @@ def main(data_dir="data", save_dir="saves"):
         train_dataset=train_set,
         eval_dataset=test_set,
         callbacks=[MyCallback],
+        optimizers=(
+            torch.optim.AdamW(model.parameters()),
+            torch.optim.lr_scheduler.OneCycleLR,
+        ),
         args=TrainingArguments(
             output_dir=str(save_dir),
             report_to=["wandb"] if os.getenv("WANDB_API_KEY") else None,
@@ -130,6 +133,7 @@ def main(data_dir="data", save_dir="saves"):
             torch_compile=True,
             # https://huggingface.co/docs/accelerate/usage_guides/memory
             auto_find_batch_size=True,
+            deepspeed=deepspeed,
         ),
     )
     trainer.train(resume_from_checkpoint=last_checkpoint_dir)
