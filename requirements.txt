@@ -1,7 +1,11 @@
-torch
-transformers
-datasets
+torch>=2.0
+transformers[deepspeed]
 tokenizers
-peft
-dagshub
+datasets
+dvc
+dvc_gs
 lxml
+peft
+accelerate
+flask
+cloudpathlib[gs]
