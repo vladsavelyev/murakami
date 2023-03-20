@@ -9,13 +9,16 @@ from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from accelerate.utils import set_seed
 import fire
+from cloudpathlib.anypath import AnyPath
 
 
 model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 use_peft = True
 
 
-def main(data_path: str = "data", save_path: str = "saves"):
+def main(data_dir="data", save_dir="saves"):
+    data_dir = AnyPath(data_dir)
+    save_dir = AnyPath(save_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print(f"Model parameters: {model.num_parameters():,}")
@@ -71,14 +74,14 @@ def main(data_path: str = "data", save_path: str = "saves"):
             print(f"Dataset shape: {ids.shape}")
             return MurakamiDataset(ids, n_ctx)
 
-    test_text_path = data_path / "murakami_test.txt"
-    train_text_path = data_path / "murakami_train.txt"
+    test_text_path = data_dir / "murakami_test.txt"
+    train_text_path = data_dir / "murakami_train.txt"
     test_set = MurakamiDataset.load(
         test_text_path, tokenizer, model.config.n_ctx, max_n_examples=100
     )
     train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
 
-    save_dir = save_path / "murakami_rugpt3small" + ("_peft" if use_peft else "")
+    save_dir = save_dir / "murakami_rugpt3small" + ("_peft" if use_peft else "")
     save_dir.mkdir(exist_ok=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
