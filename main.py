@@ -113,10 +113,6 @@ def main(data_dir="data", peft=False, dry_run=False):
         train_dataset=train_set,
         eval_dataset=test_set,
         callbacks=[MyCallback],
-        optimizers=(
-            torch.optim.AdamW(model.parameters()),
-            torch.optim.lr_scheduler.OneCycleLR(),
-        ),
         args=TrainingArguments(
             output_dir=str(save_dir),
             push_to_hub=os.getenv("HUB_TOKEN") is not None,
