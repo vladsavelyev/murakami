@@ -71,7 +71,7 @@ class MurakamiDataset(Dataset):
         return MurakamiDataset(ids, n_ctx)
 
 
-def main(data_dir="data", peft=False, dry_run=False):
+def main(data_dir="data", use_peft=False, dry_run=False):
     data_dir = Path(data_dir)
     tokenizer = AutoTokenizer.from_pretrained(source_model_name)
     try:
@@ -82,7 +82,7 @@ def main(data_dir="data", peft=False, dry_run=False):
         )
         model = AutoModelForCausalLM.from_pretrained(source_model_name)
     print(f"Model parameters: {model.num_parameters():,}")
-    if peft:
+    if use_peft:
         from peft import get_peft_model, LoraConfig, TaskType
 
         model = get_peft_model(
@@ -109,7 +109,7 @@ def main(data_dir="data", peft=False, dry_run=False):
         split="test",
     )
 
-    save_dir = Path("saves") / f"murakami_rugpt3small{'_peft' if peft else ''}"
+    save_dir = Path("saves") / f"murakami_rugpt3small{'_peft' if use_peft else ''}"
     save_dir.mkdir(exist_ok=True, parents=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
