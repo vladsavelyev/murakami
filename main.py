@@ -7,11 +7,58 @@ from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
+from datasets import Dataset as HFDataset
 from accelerate.utils import set_seed
 import fire
 
 
 model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
+
+
+class MurakamiDataset(Dataset):
+    def __init__(self, token_ids: np.memmap, n_ctx: int):
+        self.token_ids = token_ids
+        self.n_ctx = n_ctx
+
+    def __getitem__(self, idx):
+        t = torch.LongTensor(self.token_ids[idx : idx + self.n_ctx])
+        return {"input_ids": t, "labels": t}
+
+    def __len__(self):
+        return len(self.token_ids) - self.n_ctx + 1
+
+    @staticmethod
+    def load(
+        txt_path,
+        tokenizer,
+        n_ctx: int,
+        max_n_examples: int = None,
+        split: str = None,
+    ) -> "MurakamiDataset":
+        if (pt_path := txt_path.with_suffix(".token_ids.pt")).exists():
+            print(f"Loading dataset from {pt_path}")
+            ids = torch.load(str(pt_path))
+        else:
+            with open(txt_path, "r") as f:
+                text = f.read()
+                print(f"Characters in text: {len(text):,}")
+                if split and (token := os.getenv("HUB_TOKEN")):
+                    print(f"Pushing to HuggingFace Hub as {split} split")
+                    HFDataset.from_text(str(txt_path), split=split).push_to_hub(
+                        "vldsavelyev/murakami_rugpt3small", token=os.getenv("HUB_TOKEN")
+                    )
+            ids = tokenizer(text, return_tensors="pt")["input_ids"].squeeze().long()
+            if max_n_examples:
+                max_tokens = max_n_examples + n_ctx - 1
+                print(
+                    f"Taking first {max_tokens} tokens to make it {max_n_examples} examples"
+                )
+                ids = ids[:max_tokens]
+            eos = torch.tensor([tokenizer.eos_token_id]).long()
+            ids = torch.concat((ids, eos))
+            torch.save(ids, pt_path)
+        print(f"Dataset shape: {ids.shape}")
+        return MurakamiDataset(ids, n_ctx)
 
 
 def main(data_dir="data", peft=False, dry_run=False):
@@ -35,48 +82,16 @@ def main(data_dir="data", peft=False, dry_run=False):
         print("Parameter-efficient fine tuning trainable parameters:")
         model.print_trainable_parameters()
 
-    class MurakamiDataset(Dataset):
-        def __init__(self, token_ids: np.memmap, n_ctx: int):
-            self.token_ids = token_ids
-            self.n_ctx = n_ctx
-
-        def __getitem__(self, idx):
-            t = torch.LongTensor(self.token_ids[idx : idx + self.n_ctx])
-            return {"input_ids": t, "labels": t}
-
-        def __len__(self):
-            return len(self.token_ids) - self.n_ctx + 1
-
-        @staticmethod
-        def load(
-            txt_path, tokenizer, n_ctx: int, max_n_examples: int = None
-        ) -> "MurakamiDataset":
-            if (pt_path := txt_path.with_suffix(".token_ids.pt")).exists():
-                print(f"Loading dataset from {pt_path}")
-                ids = torch.load(str(pt_path))
-            else:
-                with open(txt_path, "r") as f:
-                    text = f.read()
-                    print(f"Characters in text: {len(text):,}")
-                ids = tokenizer(text, return_tensors="pt")["input_ids"].squeeze().long()
-                if max_n_examples:
-                    max_tokens = max_n_examples + n_ctx - 1
-                    print(
-                        f"Taking first {max_tokens} tokens to make it {max_n_examples} examples"
-                    )
-                    ids = ids[:max_tokens]
-                eos = torch.tensor([tokenizer.eos_token_id]).long()
-                ids = torch.concat((ids, eos))
-                torch.save(ids, pt_path)
-            print(f"Dataset shape: {ids.shape}")
-            return MurakamiDataset(ids, n_ctx)
-
-    test_text_path = data_dir / "murakami_test.txt"
-    train_text_path = data_dir / "murakami_train.txt"
-    test_set = MurakamiDataset.load(
-        test_text_path, tokenizer, model.config.n_ctx, max_n_examples=100
+    train_set = MurakamiDataset.load(
+        data_dir / "murakami_train.txt", tokenizer, model.config.n_ctx, split="train"
     )
-    train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
+    test_set = MurakamiDataset.load(
+        data_dir / "murakami_test.txt",
+        tokenizer,
+        model.config.n_ctx,
+        max_n_examples=100,
+        split="test",
+    )
 
     save_dir = Path("saves") / f"murakami_rugpt3small{'_peft' if peft else ''}"
     save_dir.mkdir(exist_ok=True, parents=True)
