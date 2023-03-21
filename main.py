@@ -84,7 +84,7 @@ def main(data_dir="data", peft=False, dry_run=False):
         last_checkpoint_dir = Path(last_checkpoint_dir)
         print([t.name for t in last_checkpoint_dir.iterdir()])
 
-    def sample(num_seqs=5, max_length=20):
+    def sample(num_seqs=2, max_length=100):
         set_seed(42)
         for i, seq in enumerate(
             model.generate(
@@ -120,8 +120,8 @@ def main(data_dir="data", peft=False, dry_run=False):
             report_to=["wandb"] if os.getenv("WANDB_API_KEY") else None,
             overwrite_output_dir=True,
             evaluation_strategy="steps",
-            eval_steps=1000,
-            save_steps=1000,
+            eval_steps=5000,
+            save_steps=5000,
             save_total_limit=2,
             # per_device_train_batch_size=2,
             # per_device_eval_batch_size=2,
