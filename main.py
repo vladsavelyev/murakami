@@ -115,7 +115,7 @@ def main(data_dir="data", peft=False, dry_run=False):
         callbacks=[MyCallback],
         optimizers=(
             torch.optim.AdamW(model.parameters()),
-            torch.optim.lr_scheduler.OneCycleLR,
+            torch.optim.lr_scheduler.OneCycleLR(),
         ),
         args=TrainingArguments(
             output_dir=str(save_dir),
