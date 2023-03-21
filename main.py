@@ -9,15 +9,13 @@ from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from accelerate.utils import set_seed
 import fire
-from cloudpathlib.anypath import AnyPath
 
 
 model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 
 
-def main(data_dir="data", save_dir="saves", peft=False, deepspeed=True):
-    data_dir = AnyPath(data_dir)
-    save_dir = AnyPath(save_dir)
+def main(data_dir="data", peft=False, dry_run=False):
+    data_dir = Path(data_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print(f"Model parameters: {model.num_parameters():,}")
@@ -80,7 +78,7 @@ def main(data_dir="data", save_dir="saves", peft=False, deepspeed=True):
     )
     train_set = MurakamiDataset.load(train_text_path, tokenizer, model.config.n_ctx)
 
-    save_dir = save_dir / f"murakami_rugpt3small{'_peft' if peft else ''}"
+    save_dir = Path("saves") / f"murakami_rugpt3small{'_peft' if peft else ''}"
     save_dir.mkdir(exist_ok=True, parents=True)
     if last_checkpoint_dir := get_last_checkpoint(str(save_dir)):
         last_checkpoint_dir = Path(last_checkpoint_dir)
@@ -121,22 +119,28 @@ def main(data_dir="data", save_dir="saves", peft=False, deepspeed=True):
         ),
         args=TrainingArguments(
             output_dir=str(save_dir),
+            push_to_hub=os.getenv("HUB_TOKEN") is not None,
+            hub_token=os.getenv("HUB_TOKEN"),
             report_to=["wandb"] if os.getenv("WANDB_API_KEY") else None,
             overwrite_output_dir=True,
             evaluation_strategy="steps",
             eval_steps=1000,
             save_steps=1000,
             save_total_limit=2,
-            per_device_train_batch_size=2,
-            per_device_eval_batch_size=2,
+            # per_device_train_batch_size=2,
+            # per_device_eval_batch_size=2,
             ignore_data_skip=True,
-            torch_compile=True,
+            torch_compile=True if torch.cuda.is_available() else False,
             # https://huggingface.co/docs/accelerate/usage_guides/memory
             auto_find_batch_size=True,
-            fp16=True,
+            fp16=True if torch.cuda.is_available() else False,
         ),
     )
-    trainer.train(resume_from_checkpoint=last_checkpoint_dir)
+    if not dry_run:
+        trainer.train(resume_from_checkpoint=last_checkpoint_dir)
+
+    # Save and push to hub
+    trainer.save_model()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,5 @@ dvc_gs
 lxml
 peft
 accelerate
-flask
-cloudpathlib[gs]
+wandb
 fire
