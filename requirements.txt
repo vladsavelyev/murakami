@@ -10,3 +10,4 @@ accelerate
 wandb
 fire
 black
+coloredlogs

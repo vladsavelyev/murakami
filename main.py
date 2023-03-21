@@ -11,6 +11,9 @@ from datasets import Dataset as HFDataset
 from datasets import load_dataset
 from accelerate.utils import set_seed
 import fire
+import coloredlogs
+
+coloredlogs.install(level="DEBUG")
 
 
 source_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
@@ -41,12 +44,14 @@ class MurakamiDataset(Dataset):
             print(f"Loading dataset from {pt_path}")
             ids = torch.load(str(pt_path))
         else:
+            text = None
             if token := os.getenv("HUB_TOKEN"):
                 try:
                     d = load_dataset(model_name, split=split, use_auth_token=token)
-                    text = d["text"]
                 except:
-                    text = ""
+                    pass
+                else:
+                    text = d["text"]
             if not text:
                 print(f"Dataset {model_name} not found on Hub, loading from file {txt_path}")
                 with open(txt_path, "r") as f:
