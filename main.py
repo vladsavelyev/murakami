@@ -8,11 +8,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import Trainer, TrainingArguments, TrainerCallback
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import Dataset as HFDataset
+from datasets import load_dataset
 from accelerate.utils import set_seed
 import fire
 
 
-model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
+source_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
+model_name = "vldsavelyev/murakami_rugpt3small"
 
 
 class MurakamiDataset(Dataset):
@@ -32,21 +34,29 @@ class MurakamiDataset(Dataset):
         txt_path,
         tokenizer,
         n_ctx: int,
+        split: str,
         max_n_examples: int = None,
-        split: str = None,
     ) -> "MurakamiDataset":
         if (pt_path := txt_path.with_suffix(".token_ids.pt")).exists():
             print(f"Loading dataset from {pt_path}")
             ids = torch.load(str(pt_path))
         else:
-            with open(txt_path, "r") as f:
-                text = f.read()
-                print(f"Characters in text: {len(text):,}")
-                if split and (token := os.getenv("HUB_TOKEN")):
+            if token := os.getenv("HUB_TOKEN"):
+                try:
+                    d = load_dataset(model_name, split=split, use_auth_token=token)
+                    text = d["text"]
+                except:
+                    text = ""
+            if not text:
+                print(f"Dataset {model_name} not found on Hub, loading from file {txt_path}")
+                with open(txt_path, "r") as f:
+                    text = f.read()
+                if token := os.getenv("HUB_TOKEN"):
                     print(f"Pushing to HuggingFace Hub as {split} split")
                     HFDataset.from_text(str(txt_path), split=split).push_to_hub(
                         "vldsavelyev/murakami_rugpt3small", token=os.getenv("HUB_TOKEN")
                     )
+            print(f"Characters in text: {len(text):,}")
             ids = tokenizer(text, return_tensors="pt")["input_ids"].squeeze().long()
             if max_n_examples:
                 max_tokens = max_n_examples + n_ctx - 1
@@ -63,8 +73,14 @@ class MurakamiDataset(Dataset):
 
 def main(data_dir="data", peft=False, dry_run=False):
     data_dir = Path(data_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(source_model_name)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+    except:
+        print(
+            f"Model {model_name} not found, loading from source model {source_model_name}"
+        )
+        model = AutoModelForCausalLM.from_pretrained(source_model_name)
     print(f"Model parameters: {model.num_parameters():,}")
     if peft:
         from peft import get_peft_model, LoraConfig, TaskType
