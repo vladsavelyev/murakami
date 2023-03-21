@@ -130,7 +130,7 @@ def main(data_dir="data", peft=False, dry_run=False):
             # per_device_train_batch_size=2,
             # per_device_eval_batch_size=2,
             ignore_data_skip=True,
-            torch_compile=True if torch.cuda.is_available() else False,
+            torch_compile=False,
             # https://huggingface.co/docs/accelerate/usage_guides/memory
             auto_find_batch_size=True,
             fp16=True if torch.cuda.is_available() else False,
