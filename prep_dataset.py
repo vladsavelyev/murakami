@@ -1,13 +1,24 @@
 """
-Reads all *.fb2 files from the ../data/murakami_fb2s directory and concatenates
-them into one file ../data/murakami.txt
+Reads all *.fb2 files from the ../data/murakami_fb2s directory and
+concats them into one text file, and pushes them to Huggingface Hub
+as `vldsavelyev/murakami` dataset repository.
 """
 
+import os
 from pathlib import Path
 from lxml import etree
+import datasets
+from datasets import Dataset
+from huggingface_hub import create_repo
+import fire
+import coloredlogs
 
-# Number of initial <p> element to take from each fb2, by number. This allows to skip 
-# intros and other junk in the beginning of an fb2. This is built semi-manually using 
+coloredlogs.install(level="info")
+datasets.logging.set_verbosity_info()
+
+
+# Number of initial <p> element to take from each fb2, by number. This allows to skip
+# intros and other junk in the beginning of an fb2. This is built semi-manually using
 # the `helper_to_find_first_paragraphs` func.
 START_PARAGRAPHS = {
     3: 5,
@@ -49,12 +60,16 @@ def helper_to_find_first_paragraphs(paragraphs, title, book_number, n=30):
             print(f"   {i} {p.text}")
 
 
-def main():
-    basedir = Path("/Users/vlad/googledrive/AI/datasets/murakami")
-
+def main(fb2_dir: Path, name: str = "murakami"):
     text_by_name = {}
 
-    for bi, path in enumerate((basedir / "fb2").glob("*.fb2")):
+    fb2s = list(Path(fb2_dir).glob("*.fb2"))
+    if len(fb2s) > 0:
+        print(f"Found {len(fb2s)} fb2 files in {fb2_dir}")
+    else:
+        raise ValueError(f"No fb2 files found in {fb2_dir}")
+
+    for bi, path in enumerate(fb2s):
         print(bi, path)
 
         # Load the FB2 format file
@@ -67,13 +82,14 @@ def main():
         # Parse the FB2 format file using lxml
         root = etree.fromstring(fb2_data)
 
-        # Print the title of the book
+        # Get the title of the book
         title = root.xpath(
             "//fb:title-info/fb:book-title",
             namespaces={"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"},
         )[0].text
         print(title)
 
+        # Get all book paragraphs
         paragraphs = root.xpath(
             "//fb:p",
             namespaces={"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"},
@@ -100,8 +116,6 @@ def main():
             text_by_name[title] += p.text.replace(" ", " ") + "\n"
         text_by_name[title] += "\n"
 
-    assert text_by_name
-
     print("Novel by size:")
     for title, text in text_by_name.items():
         print(f"  {title}: {len(text):,} characters")
@@ -111,15 +125,25 @@ def main():
         f"Using smallest novel {smallest_title} "
         f"({len(text_by_name[smallest_title]):,} characters) as a test set"
     )
-
-    with open(basedir / "murakami_train.txt", "w") as f:
-        for title, text in text_by_name.items():
-            if title != smallest_title:
-                f.write(text)
-
-    with open(basedir / "murakami_test.txt", "w") as f:
-        f.write(text_by_name[smallest_title])
+    train = Dataset.from_dict(
+        {
+            "text": [
+                text_by_name[title] for title in text_by_name if title != smallest_title
+            ]
+        },
+        split="train",
+    )
+    test = Dataset.from_dict(
+        {"text": [text_by_name[smallest_title]]},
+        split="test",
+    )
+    if token := os.getenv("HUB_TOKEN"):
+        print(f"Pushing dataset to Huggingface Hub as dataset {name}...")
+        create_repo(name, token=token, repo_type="dataset", exist_ok=True)
+        train.push_to_hub(name, token=token)
+        test.push_to_hub(name, token=token)
+        print("Finished uploading dataset to Huggingface Hub")
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)

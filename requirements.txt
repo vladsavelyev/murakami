@@ -2,8 +2,7 @@ torch>=2.0
 transformers[deepspeed]
 tokenizers
 datasets
-dvc
-dvc_gs
+huggingface_hub
 lxml
 peft
 accelerate

@@ -1,4 +1,4 @@
 [tool.black]
 line-length = 88
 skip-string-normalization = true
-exclude = venv
+exclude = "venv"
