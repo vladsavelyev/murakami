@@ -1,10 +1,32 @@
 # Murakami
 
-GTP2, fine-tuned to Russian ([rugpt3small_based_on_gpt2](https://huggingface.co/sberbank-ai/rugpt3small_based_on_gpt2)), further fine-tuned to generate Russian translations of H. Murakami books.
+GTP2 model, fine-tuned to Russian ([rugpt3small_based_on_gpt2](https://huggingface.co/sberbank-ai/rugpt3small_based_on_gpt2)), further fine-tuned to generate [Russian translations of H. Murakami books](https://huggingface.co/datasets/vldsavelyev/murakami).
 
-## Train
+## Training
 
-1. Create a GCP instance with a GPU available. The `deeplearning-platform-release` project provides instance images with pre-installed Nvidia drivers and conda, along with common ML tools (though we are interested only in conda, as we will be setting a python 3.10 environment opposed to the pre-installed python 3.7).
+Training arguments are optimized for Google Colab GPU with 15G of memory. I experimented with the following configurations:
+
+* AdamW optimizer, batch_size=8, gradient_checkpointing=True, fp16=True, gradient_accumulation=None
+
+    * Result: max mem usage 14.8G, time for 50 steps: 243.
+
+* Adafactor optimizer, batch_size=8, gradient_checkpointing=False, fp16=False, gradient_accumulation=None
+
+    * Result: max mem usage 12.2G, time for 50 steps: 471.
+    * Too slow, and we have spare memory which we can use to benefit from fp16 optimization.
+
+* Same config with fp16=True:
+
+    * Result: max mem usage 13.8G; time for 50 steps: 260. 
+    * Pretty good, but AdamW is slightly more optimal.
+
+* I also tried to apply gradient_accumulation to increase the virtual batch size. However, all
+experiments led to CUDA OOM:
+
+    * adafactor, batch_size=4, gradient_checkpointing=False, fp16=True, gradient_accumulation=4
+    * AdamW, batch_size=4, gradient_checkpointing=True, fp16=True, gradient_accumulation=4
+
+2. One can also run training on a custom GCP instance with a GPU available. The `deeplearning-platform-release` project provides instance images with pre-installed Nvidia drivers and conda, along with common ML tools (though we are interested only in conda, as we will be setting a python 3.10 environment opposed to the pre-installed python 3.7).
 
 ```sh
 NAME=murakami
