@@ -1,6 +1,5 @@
 torch>=2.0
-transformers[deepspeed]
-nvidia-ml-py3
+transformers
 tokenizers
 datasets
 huggingface_hub
@@ -10,3 +9,4 @@ wandb
 fire
 black
 coloredlogs
+nvidia-ml-py3  # memory monitoring
