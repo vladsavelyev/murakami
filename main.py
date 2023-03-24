@@ -10,7 +10,9 @@ from transformers import (
     Trainer,
     TrainingArguments,
     TrainerCallback,
+    DataCollatorForLanguageModeling,
     set_seed,
+    default_data_collator,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import Dataset, load_dataset
@@ -23,89 +25,17 @@ datasets.logging.set_verbosity_info()
 transformers.logging.set_verbosity_info()
 
 
-class MurakamiDataset(torch.utils.data.Dataset):
-    def __init__(self, token_ids: np.memmap, n_ctx: int):
-        self.token_ids = token_ids
-        self.n_ctx = n_ctx
-
-    def __getitem__(self, idx):
-        t = torch.LongTensor(self.token_ids[idx : idx + self.n_ctx])
-        return {"input_ids": t, "labels": t}
-
-    def __len__(self):
-        return len(self.token_ids) - self.n_ctx + 1
-
-    @staticmethod
-    def load(
-        tokenizer,
-        n_ctx: int,
-        split: str,
-        text_path=None,
-        model_name=None,
-        repo=None,
-        max_n_examples: int = None,
-    ) -> "MurakamiDataset":
-        if text_path and (pt_path := text_path.with_suffix(".token_ids.pt")).exists():
-            print(f"Loading dataset from {pt_path}")
-            ids = torch.load(str(pt_path))
-        else:
-            text = None
-            if repo:
-                try:
-                    d = load_dataset(model_name, split=split, cache_dir=repo.local_dir)
-                except:
-                    pass
-                else:
-                    print(f"Loaded text from local dataset repo clone {repo.local_dir}")
-                    text = d["text"]
-            else:
-                try:
-                    d = load_dataset(model_name, split=split)
-                except:
-                    pass
-                else:
-                    print(f"Loaded text from remote dataset repo {model_name}")
-                    text = d["text"]
-            if not text:
-                print(
-                    f"Dataset {model_name} not found on Hub, loading from file {text_path}"
-                )
-                with open(text_path, "r") as f:
-                    text = f.read()
-                if token := os.getenv("HUB_TOKEN"):
-                    print(f"Pushing to HuggingFace Hub as {split} split")
-                    Dataset.from_text(str(text_path), split=split).push_to_hub(
-                        model_name, token=token
-                    )
-                    if repo:
-                        print("Syncing local repo after updating remote")
-                        repo.git_pull()
-            print(f"Characters in text: {len(text):,}")
-            ids = tokenizer(text, return_tensors="pt")["input_ids"].squeeze().long()
-            if max_n_examples:
-                max_tokens = max_n_examples + n_ctx - 1
-                print(
-                    f"Taking first {max_tokens} tokens to make it {max_n_examples} examples"
-                )
-                ids = ids[:max_tokens]
-            eos = torch.tensor([tokenizer.eos_token_id]).long()
-            ids = torch.concat((ids, eos))
-            torch.save(ids, pt_path)
-        print(f"Dataset shape: {ids.shape}")
-        return MurakamiDataset(ids, n_ctx)
-
-
-def main(use_peft=False, dry_run=False, push_to_hub=False):
+def main(use_peft=False, dry_run=False, push_to_hub=False, debugging=False):
     base_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
     model_name = "vldsavelyev/murakami_rugpt3small"
+    dataset_name = "vldsavelyev/murakami"
     if use_peft:
         model_name += "_peft"
-
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 
     repos_dir = Path(os.getenv("HUGGINGFACE_HUB_REPOS") or "huggingface-hub")
     repo: Repository = None
     if token := os.getenv("HUB_TOKEN"):
+        print(f"Hub token found, cloning model repo {model_name} to {repos_dir}")
         create_repo(model_name, token=token, exist_ok=True)
         repo = Repository(
             local_dir=repos_dir / "models" / model_name, clone_from=model_name
@@ -119,9 +49,12 @@ def main(use_peft=False, dry_run=False, push_to_hub=False):
             model = AutoModelForCausalLM.from_pretrained(model_name)
         except:
             print(
-                f"Finetuned model {model_name} not found, loading from base model {base_model_name}"
+                f"Finetuned model {model_name} not found, loading base model {base_model_name}"
             )
             model = AutoModelForCausalLM.from_pretrained(base_model_name)
+            print(f"Loaded base model {base_model_name}")
+        else:
+            print(f"Loaded finetuned model {model_name}")
 
     print(f"Model parameters: {model.num_parameters():,}")
     if use_peft:
@@ -140,37 +73,57 @@ def main(use_peft=False, dry_run=False, push_to_hub=False):
         print("Parameter-efficient fine tuning trainable parameters:")
         model.print_trainable_parameters()
 
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    # Some examples might be shorter than the context length, so we will need to pad
+    # them with DataCollatorForLanguageModeling
+    tokenizer.pad_token = tokenizer.eos_token
+
     if token := os.getenv("HUB_TOKEN"):
+        print(f"Hub token found, cloning dataset repo {dataset_name} to {repos_dir}")
         create_repo(model_name, token=token, repo_type="dataset", exist_ok=True)
         data_repo = Repository(
-            local_dir=repos_dir / "datasets" / model_name,
-            clone_from=model_name,
+            local_dir=repos_dir / "datasets" / dataset_name,
+            clone_from=dataset_name,
             repo_type="dataset",
         )
         data_repo.git_pull()
-        data_dir = None
+        print(f"Loading dataset from local repo clone at {data_repo.local_dir}")
+        dataset = load_dataset(data_repo.local_dir)
     else:
-        data_dir = "data"
+        print(f"Loading dataset from remote repo {dataset_name}")
+        dataset = load_dataset(dataset_name)
 
-    
+    # Following this example to prepare examples:
+    # https://github.com/huggingface/transformers/blob/main/examples/pytorch/language-modeling/run_clm.py
 
-    train_set = MurakamiDataset.load(
-        tokenizer,
-        model.config.n_ctx,
-        split="train",
-        model_name=model_name,
-        repo=data_repo,
-        text_path=data_dir / "murakami_train.txt" if data_dir else None,
-    )
-    test_set = MurakamiDataset.load(
-        tokenizer,
-        model.config.n_ctx,
-        max_n_examples=100,
-        split="test",
-        model_name=model_name,
-        repo=data_repo,
-        text_path=data_dir / "murakami_test.txt" if data_dir else None,
-    )
+    def _tokenize(x):
+        return {
+            'input_ids': [tokenizer.bos_token_id]
+            + tokenizer(x["text"])['input_ids']
+            + [tokenizer.eos_token_id]
+        }
+
+    dataset = dataset.map(_tokenize, batched=False, remove_columns=["text"])
+
+    def _chunk(batch: dict[str, list]):
+        block_size = model.config.n_ctx
+        step = int(block_size * 0.8)  # we want the blocks to overlap by 20%
+
+        chunked_batch = {}
+        for k, examples in batch.items():
+            chunked_batch[k] = []
+            for x in examples:
+                for i in range(0, len(x) - block_size + 1, step):
+                    chunked_batch[k].append(x[i : i + block_size])
+                if chunked_batch[k][-1] != x[-1]:
+                    # if the last chunk containing eos was shorter than the blocks size
+                    # and wasn't included, we add it explicitly:
+                    chunked_batch[k].append(x[-block_size:])
+        return chunked_batch
+
+    dataset = dataset.map(_chunk, batched=True)
+    dataset.flatten()
+
 
     def sample(num_seqs=2, max_length=100):
         set_seed(42)
@@ -181,7 +134,7 @@ def main(use_peft=False, dry_run=False, push_to_hub=False):
                 num_return_sequences=num_seqs,
                 do_sample=True,
                 top_k=50,
-                pad_token_id=0,
+                # pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
                 bos_token_id=tokenizer.bos_token_id,
             )
@@ -196,13 +149,18 @@ def main(use_peft=False, dry_run=False, push_to_hub=False):
                 print(f"Best loss so far: {state.best_metric:.4f}")
             sample()
 
+    save_dir = str(repo.local_dir) if repo else model_name
     trainer = Trainer(
         model=model,
-        train_dataset=train_set,
-        eval_dataset=test_set,
+        data_collator=DataCollatorForLanguageModeling(
+            tokenizer=tokenizer,
+            mlm=False,
+        ),
+        train_dataset=dataset['train'],
+        eval_dataset=dataset['test'],
         callbacks=[MyCallback],
         args=TrainingArguments(
-            output_dir=str(hub_repo_dir),
+            output_dir=save_dir,
             push_to_hub=push_to_hub and os.getenv("HUB_TOKEN") is not None,
             hub_model_id=model_name,
             hub_token=os.getenv("HUB_TOKEN"),
@@ -215,14 +173,23 @@ def main(use_peft=False, dry_run=False, push_to_hub=False):
             # per_device_train_batch_size=2,
             # per_device_eval_batch_size=2,
             ignore_data_skip=True,
-            torch_compile=False,
+            torch_compile=not debugging,
             # https://huggingface.co/docs/accelerate/usage_guides/memory
             auto_find_batch_size=True,
-            fp16=True if torch.cuda.is_available() else False,
+            skip_memory_metrics=False,
         ),
     )
+    mem_b = model.num_parameters() * sum(
+        [
+            4,  # weights
+            8,  # AdamW's two states
+            4,  # gradients
+        ]
+    )
+    print("Estimated model GPU memory usage: {:.2f} GB".format(mem_b / 1024**3))
+
     if not dry_run:
-        trainer.train(resume_from_checkpoint=get_last_checkpoint(hub_repo_dir))
+        trainer.train(resume_from_checkpoint=get_last_checkpoint(save_dir))
 
         if push_to_hub:
             # Save and push to hub
