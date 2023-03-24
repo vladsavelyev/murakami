@@ -1,9 +1,9 @@
 torch>=2.0
 transformers[deepspeed]
+nvidia-ml-py3
 tokenizers
 datasets
 huggingface_hub
-lxml
 peft
 accelerate
 wandb
