@@ -3,10 +3,9 @@ transformers
 tokenizers
 datasets
 huggingface_hub
-peft
 accelerate
+peft
 wandb
-fire
 black
 coloredlogs
 nvidia-ml-py3  # memory monitoring
