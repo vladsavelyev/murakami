@@ -1,3 +1,11 @@
+"""
+Using Huggingface ecosystem to fine-tune an LLM.
+
+References used:
+- Huggingface official example for training a causal LM: https://github.com/huggingface/transformers/blob/main/examples/pytorch/language-modeling/run_clm.py
+- Huggingface course's chapter about training a causal LM from scratch: https://huggingface.co/course/chapter7/6?fw=pt
+"""
+
 import os
 from pathlib import Path
 
@@ -10,6 +18,7 @@ from transformers import (
     TrainerCallback,
     DataCollatorForLanguageModeling,
     set_seed,
+    pipeline,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset
@@ -98,56 +107,48 @@ else:
     print(f"Loading dataset from remote repo {dataset_name}")
     dataset = load_dataset(dataset_name)
 
-# Following this example to prepare examples:
-# https://github.com/huggingface/transformers/blob/main/examples/pytorch/language-modeling/run_clm.py
+
+n_ctx = model.config.n_ctx
 
 
-def _tokenize(x):
-    return {
-        'input_ids': [tokenizer.bos_token_id]
-        + tokenizer(x["text"])['input_ids']
-        + [tokenizer.eos_token_id]
-    }
+# Wrap novel chapters with BOS and EOS tokens (tokenizer doesn't do that even
+# if add_special_tokens is True, see https://github.com/huggingface/transformers/issues/3311)
+dataset = dataset.map(
+    lambda x: {'text': f'{tokenizer.bos_token}{x["text"]}{tokenizer.eos_token}'}
+)
 
 
-dataset = dataset.map(_tokenize, batched=False, remove_columns=["text"])
+def _tokenize(batch: dict[str, list]):
+    ids = tokenizer(
+        batch["text"],
+        max_length=n_ctx,
+        truncation=True,  # because of the option below, it will chunk
+        return_overflowing_tokens=True,  # ...tokens, not trancate
+        stride=int(n_ctx * 0.2),  # we want the chunks to overlap by 20%
+    )['input_ids']
+    return {'input_ids': ids}
 
 
-def _chunk(batch: dict[str, list]):
-    block_size = model.config.n_ctx
-    step = int(block_size * 0.8)  # we want the blocks to overlap by 20%
+dataset = dataset.map(
+    _tokenize, batched=True, remove_columns=dataset.column_names["train"]
+)
 
-    chunked_batch = {}
-    for k, examples in batch.items():
-        chunked_batch[k] = []
-        for x in examples:
-            for i in range(0, len(x) - block_size + 1, step):
-                chunked_batch[k].append(x[i : i + block_size])
-            if chunked_batch[k][-1] != x[-1]:
-                # if the last chunk containing eos was shorter than the blocks size
-                # and wasn't included, we add it explicitly:
-                chunked_batch[k].append(x[-block_size:])
-    return chunked_batch
+generator = pipeline(
+    "text-generation", model=model, tokenizer=tokenizer, device=model.device
+)
 
 
-dataset = dataset.map(_chunk, batched=True)
-
-
-def sample(num_seqs=1, max_length=200):
+def sample(num_return_sequences=1, max_length=200):
     set_seed(42)
-    for i, seq in enumerate(
-        model.generate(
-            max_length=max_length,
-            top_p=0.95,
-            num_return_sequences=num_seqs,
-            do_sample=True,
-            top_k=50,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-        )
-    ):
-        print(i + 1, tokenizer.decode(seq))
+    for result in generator(
+        [tokenizer.bos_token],
+        num_return_sequences=num_return_sequences,
+        max_length=max_length,
+        do_sample=True,
+        top_p=0.95,
+        top_k=50,
+    )[0]:
+        print(result["generated_text"])
 
 
 class MyCallback(TrainerCallback):
@@ -175,6 +176,8 @@ if transformers.utils.is_torch_cuda_available():
         logging_strategy="steps",
         logging_steps=50,
         save_total_limit=2,
+        lr_scheduler_type="cosine",
+        warmup_steps=100,
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         # Batch size >1 causes EOM on standard T4 Colab GPU (which is weird
@@ -206,7 +209,7 @@ else:
     training_args = TrainingArguments(
         output_dir=save_dir,
         evaluation_strategy="steps",
-        eval_steps=5,
+        eval_steps=1,
         logging_steps=1,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
