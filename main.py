@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-import datasets, transformers
+import datasets, transformers, evaluate
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -30,13 +30,15 @@ dataset_name = "vldsavelyev/murakami"
 if use_peft:
     model_name += "_peft"
 
-repos_dir = Path(os.getenv("HUGGINGFACE_HUB_REPOS") or "huggingface-hub")
+repos_dir = Path(os.getenv("HUB_REPOS") or "huggingface-hub")
 repo: Repository = None
 if token := os.getenv("HUB_TOKEN"):
     print(f"Hub token found, cloning model repo {model_name} to {repos_dir}")
     create_repo(model_name, token=token, exist_ok=True)
     repo = Repository(
-        local_dir=repos_dir / "models" / model_name, clone_from=model_name
+        local_dir=repos_dir / "models" / model_name,
+        clone_from=model_name,
+        token=token,
     )
     repo.git_pull()
     model = AutoModelForCausalLM.from_pretrained(repo.local_dir, local_files_only=True)
@@ -71,8 +73,14 @@ if use_peft:
 
 tokenizer = AutoTokenizer.from_pretrained(base_model_name)
 # Some examples might be shorter than the context length, so we will need to pad
-# them with DataCollatorForLanguageModeling
+# them with DataCollatorForLanguageModeling. Since GPT2 was trained on sequences of the
+# same size, it didn't do any padding, and doesn't specify `pad_token` and `padding_side`
+# in the config. So we need to set them manually. Note that the exact value for pad_token
+# doesn't matter because it will be masked anyway in the `attention_mask`; also note that
+# the default value for `padding_side` is right, which won't work well for next-token
+# prediction objective of GPT, so we set it to left.
 tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = 'left'
 
 if token := os.getenv("HUB_TOKEN"):
     print(f"Hub token found, cloning dataset repo {dataset_name} to {repos_dir}")
@@ -81,6 +89,7 @@ if token := os.getenv("HUB_TOKEN"):
         local_dir=repos_dir / "datasets" / dataset_name,
         clone_from=dataset_name,
         repo_type="dataset",
+        token=token,
     )
     data_repo.git_pull()
     print(f"Loading dataset from local repo clone at {data_repo.local_dir}")
@@ -151,6 +160,58 @@ class MyCallback(TrainerCallback):
 
 
 save_dir = str(repo.local_dir) if repo else model_name
+
+if transformers.utils.is_torch_cuda_available():
+    # Optimal configuration for T4 Colab GPU with 15G memory
+    training_args = TrainingArguments(
+        output_dir=save_dir,
+        overwrite_output_dir=True,
+        push_to_hub=push_to_hub and os.getenv("HUB_TOKEN") is not None,
+        hub_model_id=model_name,
+        hub_token=os.getenv("HUB_TOKEN"),
+        skip_memory_metrics=False,
+        evaluation_strategy="epochs",
+        save_strategy="epochs",
+        logging_strategy="steps",
+        logging_steps=50,
+        save_total_limit=2,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        # Batch size >1 causes EOM on standard T4 Colab GPU (which is weird
+        # though that 1 batch is just ~5G, whereas 2 batches EOMs with >15G)
+        # Anyways, we are applying optimizations recommended here:
+        # https://huggingface.co/docs/transformers/perf_train_gpu_one
+        # Note that gradient accumulation doesn't help to rescue the batch
+        # sizes >=2, however gradient checkpointing helpes a lot, making it
+        # take only 3G for 2 batches, so we can even afford a batch size of 8.
+        # Alternatively, using optim="adafactor" helps too, though slightly less.
+        gradient_checkpointing=True,
+        # gradient_accumulation_steps=4,
+        fp16=True,  # Can afford this speed-up optimization. Will boost speed 2x,
+        # consuming only a bit more memory (in theory it should take 50% more,
+        # but in practice it's below 10%).
+        ignore_data_skip=True,  # When restarting from a checkpoint, skip to
+        # the batch that should be used at this checkpoint, instead of starting
+        # from the first batch.
+        # torch_compile=True,  # Compiling triggers a torchdynamo error :-(
+        # It's only really useful on Ampere GPUs, anyway.
+        # auto_find_batch_size=True,  # Could use this flag to find the first batch
+        # that doesn't OOM (https://huggingface.co/docs/accelerate/usage_guides/memory),
+        # however in practice it's better to manually try different batch sizes in
+        # combination with optimizations like gradient checkpointing, etc (see above),
+        # find the best combination and hard-code it.
+    )
+else:
+    # For debugging on a CPU.
+    training_args = TrainingArguments(
+        output_dir=save_dir,
+        evaluation_strategy="steps",
+        eval_steps=5,
+        logging_steps=1,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+    )
+
 trainer = Trainer(
     model=model,
     data_collator=DataCollatorForLanguageModeling(
@@ -160,38 +221,7 @@ trainer = Trainer(
     train_dataset=dataset['train'],
     eval_dataset=dataset['test'],
     callbacks=[MyCallback],
-    # Optimal configuration for T4 Colab GPU with 15G memory
-    args=TrainingArguments(
-        output_dir=save_dir,
-        push_to_hub=push_to_hub and os.getenv("HUB_TOKEN") is not None,
-        hub_model_id=model_name,
-        hub_token=os.getenv("HUB_TOKEN"),
-        overwrite_output_dir=True,
-        evaluation_strategy="steps",
-        eval_steps=1000,
-        save_steps=1000,
-        save_total_limit=2,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        # Batch size >1 causes EOM on standard T4 Colab GPU (which is weird
-        # though that 1 batch is ~5G, whereas 2 batches EOMs with >15G)
-        # We are applying optimizations recommended in
-        # https://huggingface.co/docs/transformers/perf_train_gpu_one
-        # Gradient accumulation doesn't help with the batch size of 2, however
-        # gradient checkpointing gives a huge boost, only 3G is used, so we
-        # can afford batch size of 8. Using optim="adafactor" also helps,
-        # though slightly less so.
-        gradient_checkpointing=True,
-        # gradient_accumulation_steps=4,
-        fp16=True,  # Can afford this speed-up ptimization. Will boost 2x,
-        # eating only a fraction of memory (in theory it should eat 50%,
-        # but in practice it's below 10%
-        ignore_data_skip=True,
-        # torch_compile=True,  # compiling triggers a torchdynamo error :(
-        # https://huggingface.co/docs/accelerate/usage_guides/memory
-        # auto_find_batch_size=True,
-        skip_memory_metrics=False,
-    ),
+    args=training_args,
 )
 if not dry_run:
     trainer.train(resume_from_checkpoint=get_last_checkpoint(save_dir))
@@ -199,3 +229,6 @@ if not dry_run:
     if push_to_hub:
         # Save and push to hub
         trainer.save_model()
+
+
+repo.push_to_hub(commit_message="End of training 3 epochs")
