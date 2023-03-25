@@ -21,7 +21,6 @@ from transformers import (
     TrainerCallback,
     DataCollatorForLanguageModeling,
     pipeline,
-    GenerationConfig,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset
@@ -35,7 +34,7 @@ transformers.logging.set_verbosity_info()
 use_peft = False
 dry_run = True
 push_to_hub = True
-from_scratch = True
+from_base_model = True
 
 base_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 model_name = "vldsavelyev/murakami_rugpt3small"
@@ -44,14 +43,12 @@ if use_peft:
     model_name += "_peft"
 
 token = os.getenv("HF_TOKEN")
-repos_dir = Path(os.getenv("HUB_REPOS") or "huggingface-hub")
+if push_to_hub and not token:
+    raise ValueError(
+        "push_to_hub is set to True, but HF_TOKEN environment variable is not set"
+    )
 
-if not from_scratch:
-    print(f"Loading checkpoint {model_name} from Hub")
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    model.generation_config = GenerationConfig.from_pretrained(model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-else:
+if from_base_model:
     print(f"Loading base model {base_model_name}")
     model = AutoModelForCausalLM.from_pretrained(base_model_name)
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
@@ -75,8 +72,12 @@ else:
     #
     tokenizer.pad_token = '<pad>'
     tokenizer.padding_side = 'left'
-    if token:
+    if token and push_to_hub:
         tokenizer.push_to_hub(model_name, use_auth_token=token)
+else:
+    print(f"Loading checkpoint {model_name} from Hub")
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 
 print(f"Model parameters: {model.num_parameters():,}")
@@ -128,14 +129,13 @@ dataset = dataset.map(
 
 # %% SETUP TRAINER
 
-# TODO: figure out how to get the repository local dir using HfApi
-# and not the Repository class.
-save_dir = str(repos_dir / "models" / model_name)
+repos_dir = Path(os.getenv("HUB_REPOS")) or Path().resolve()
+save_dir = repos_dir / "models" / model_name
 
 if transformers.utils.is_torch_cuda_available():
     # Optimal configuration for T4 Colab GPU with 15G memory
     training_args = TrainingArguments(
-        output_dir=save_dir,
+        output_dir=str(save_dir),
         overwrite_output_dir=True,
         push_to_hub=push_to_hub and os.getenv("HUB_TOKEN") is not None,
         hub_model_id=model_name,
@@ -250,6 +250,4 @@ trainer = Trainer(
 if not dry_run:
     trainer.train(resume_from_checkpoint=get_last_checkpoint(save_dir))
     if push_to_hub:
-        # TODO figure out exact commands to go here
-        trainer.save_model()  # does it save state?
-        trainer.push_to_hub(commit_message="End of training 3 epochs")
+        trainer.save_model()  # also calls push_to_hub
