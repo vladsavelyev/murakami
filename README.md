@@ -26,6 +26,8 @@ experiments led to CUDA OOM:
     * adafactor, batch_size=4, gradient_checkpointing=False, fp16=True, gradient_accumulation=4
     * AdamW, batch_size=4, gradient_checkpointing=True, fp16=True, gradient_accumulation=4
 
+* Using linear LR strategy as "cosine" OOMs after ~60 steps. 
+
 2. One can also run training on a custom GCP instance with a GPU available. The `deeplearning-platform-release` project provides instance images with pre-installed Nvidia drivers and conda, along with common ML tools (though we are interested only in conda, as we will be setting a python 3.10 environment opposed to the pre-installed python 3.7).
 
 ```sh

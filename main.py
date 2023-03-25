@@ -6,6 +6,8 @@ References used:
 - Huggingface course's chapter about training a causal LM from scratch: https://huggingface.co/course/chapter7/6?fw=pt
 """
 
+# %% LOADING MODEL AND TOKENIZER
+
 import os
 import math
 from pathlib import Path
@@ -18,12 +20,12 @@ from transformers import (
     TrainingArguments,
     TrainerCallback,
     DataCollatorForLanguageModeling,
-    set_seed,
     pipeline,
+    GenerationConfig,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset
-from huggingface_hub import Repository, create_repo
+from huggingface_hub import HfApi
 import coloredlogs
 
 coloredlogs.install(level="info")
@@ -31,8 +33,9 @@ datasets.logging.set_verbosity_info()
 transformers.logging.set_verbosity_info()
 
 use_peft = False
-dry_run = False
+dry_run = True
 push_to_hub = True
+from_scratch = True
 
 base_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 model_name = "vldsavelyev/murakami_rugpt3small"
@@ -40,29 +43,41 @@ dataset_name = "vldsavelyev/murakami"
 if use_peft:
     model_name += "_peft"
 
+token = os.getenv("HF_TOKEN")
 repos_dir = Path(os.getenv("HUB_REPOS") or "huggingface-hub")
-repo: Repository = None
-if token := os.getenv("HUB_TOKEN"):
-    print(f"Hub token found, cloning model repo {model_name} to {repos_dir}")
-    create_repo(model_name, token=token, exist_ok=True)
-    repo = Repository(
-        local_dir=repos_dir / "models" / model_name,
-        clone_from=model_name,
-        token=token,
-    )
-    repo.git_pull()
-    model = AutoModelForCausalLM.from_pretrained(repo.local_dir, local_files_only=True)
+
+if not from_scratch:
+    print(f"Loading checkpoint {model_name} from Hub")
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model.generation_config = GenerationConfig.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 else:
-    try:
-        model = AutoModelForCausalLM.from_pretrained(model_name)
-    except:
-        print(
-            f"Finetuned model {model_name} not found, loading base model {base_model_name}"
-        )
-        model = AutoModelForCausalLM.from_pretrained(base_model_name)
-        print(f"Loaded base model {base_model_name}")
-    else:
-        print(f"Loaded finetuned model {model_name}")
+    print(f"Loading base model {base_model_name}")
+    model = AutoModelForCausalLM.from_pretrained(base_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    # * Adjusting tokenizer and generation config*
+    #
+    # Some examples might be shorter than the context length, so we will need to pad
+    # them with DataCollatorForLanguageModeling. Since GPT2 was trained on sequences of the
+    # same size, it didn't do any padding, and doesn't specify `pad_token` and `padding_side`
+    # in the config. So we need to set them manually.
+    #
+    # Note that the default value for `padding_side` is right, which won't work well
+    # for next-token prediction objective of GPT, so we set it to left.
+    #
+    # Also note that the exact value for `pad_token` doesn't matter because it will be
+    # masked anyway in the `attention_mask`. It's usually set identical to `eos_token` in
+    # GPT, however I set it to a different value (`<pad>` which has the value of 0) to
+    # avoid stupid warning here:
+    # https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L1264-L1273
+    # that assumes you had left padding, even when you actually had right padding, because
+    # your padding token is the same as your `eos_token` in the end of a senstence.
+    #
+    tokenizer.pad_token = '<pad>'
+    tokenizer.padding_side = 'left'
+    if token:
+        tokenizer.push_to_hub(model_name, use_auth_token=token)
+
 
 print(f"Model parameters: {model.num_parameters():,}")
 if use_peft:
@@ -81,36 +96,11 @@ if use_peft:
     print("Parameter-efficient fine tuning trainable parameters:")
     model.print_trainable_parameters()
 
-tokenizer = AutoTokenizer.from_pretrained(base_model_name)
-# Some examples might be shorter than the context length, so we will need to pad
-# them with DataCollatorForLanguageModeling. Since GPT2 was trained on sequences of the
-# same size, it didn't do any padding, and doesn't specify `pad_token` and `padding_side`
-# in the config. So we need to set them manually. Note that the exact value for pad_token
-# doesn't matter because it will be masked anyway in the `attention_mask`; also note that
-# the default value for `padding_side` is right, which won't work well for next-token
-# prediction objective of GPT, so we set it to left.
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = 'left'
 
-if token := os.getenv("HUB_TOKEN"):
-    print(f"Hub token found, cloning dataset repo {dataset_name} to {repos_dir}")
-    create_repo(model_name, token=token, repo_type="dataset", exist_ok=True)
-    data_repo = Repository(
-        local_dir=repos_dir / "datasets" / dataset_name,
-        clone_from=dataset_name,
-        repo_type="dataset",
-        token=token,
-    )
-    data_repo.git_pull()
-    print(f"Loading dataset from local repo clone at {data_repo.local_dir}")
-    dataset = load_dataset(data_repo.local_dir)
-else:
-    print(f"Loading dataset from remote repo {dataset_name}")
-    dataset = load_dataset(dataset_name)
+# %% LOADING DATASET
 
-
-n_ctx = model.config.n_ctx
-
+print(f"Loading dataset from remote repo {dataset_name}")
+dataset = load_dataset(dataset_name)
 
 # Wrap novel chapters with BOS and EOS tokens (tokenizer doesn't do that even
 # if add_special_tokens is True, see https://github.com/huggingface/transformers/issues/3311)
@@ -122,10 +112,11 @@ dataset = dataset.map(
 def _tokenize(batch: dict[str, list]):
     ids = tokenizer(
         batch["text"],
-        max_length=n_ctx,
+        max_length=model.config.n_ctx,
         truncation=True,  # because of the option below, it will chunk
         return_overflowing_tokens=True,  # ...tokens, not trancate
-        stride=int(n_ctx * 0.2),  # we want the chunks to overlap by 20%
+        # we want the chunks to overlap by 20%
+        stride=int(model.config.n_ctx * 0.2),
     )['input_ids']
     return {'input_ids': ids}
 
@@ -134,36 +125,12 @@ dataset = dataset.map(
     _tokenize, batched=True, remove_columns=dataset.column_names["train"]
 )
 
-generator = pipeline(
-    "text-generation", model=model, tokenizer=tokenizer, device=model.device
-)
 
+# %% SETUP TRAINER
 
-def sample(num_return_sequences=1, max_length=200):
-    set_seed(42)
-    for result in generator(
-        [tokenizer.bos_token],
-        num_return_sequences=num_return_sequences,
-        max_length=max_length,
-        do_sample=True,
-        top_p=0.95,
-        top_k=50,
-    )[0]:
-        print(result["generated_text"])
-
-
-class MyCallback(TrainerCallback):
-    def on_evaluate(self, args, state, control, **kwargs):
-        if metrics := kwargs.get("metrics"):
-            loss = metrics["eval_loss"]
-            print(f'Eval loss: {loss:.4f}')
-            print(f'Perplexity: {math.exp(loss):.2f}')
-        if state.best_metric:
-            print(f"Best loss so far: {state.best_metric:.4f}")
-        sample()
-
-
-save_dir = str(repo.local_dir) if repo else model_name
+# TODO: figure out how to get the repository local dir using HfApi
+# and not the Repository class.
+save_dir = str(repos_dir / "models" / model_name)
 
 if transformers.utils.is_torch_cuda_available():
     # Optimal configuration for T4 Colab GPU with 15G memory
@@ -173,15 +140,18 @@ if transformers.utils.is_torch_cuda_available():
         push_to_hub=push_to_hub and os.getenv("HUB_TOKEN") is not None,
         hub_model_id=model_name,
         hub_token=os.getenv("HUB_TOKEN"),
+        report_to=['all'],
         skip_memory_metrics=False,
-        evaluation_strategy="epochs",
-        save_strategy="epochs",
-        logging_strategy="steps",
-        logging_steps=50,
+        evaluation_strategy="steps",
+        save_strategy="steps",
+        save_steps=100,
+        eval_steps=100,
+        eval_accumulation_steps=20,
+        logging_steps=10,
+        logging_first_step=True,
         save_total_limit=2,
         load_best_model_at_end=True,
-        lr_scheduler_type="cosine",
-        warmup_steps=100,
+        lr_scheduler_type="linear",  # "cosine" OOMs after ~60 steps
         per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         # Batch size >1 causes EOM on standard T4 Colab GPU (which is weird
@@ -215,9 +185,54 @@ else:
         evaluation_strategy="steps",
         eval_steps=1,
         logging_steps=1,
+        logging_first_step=True,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
     )
+
+# %% GENERATION
+
+# Model's config has 50256 for `bos_token_id` and `eos_token_id`, even though
+# tokenizer has 50257 ("<|endoftext|>") which is added as a special token
+# in the end. For 50256, the tokenizer has a standard Russian word, because it
+# was completely rebuilt for the fine-tuning. 50257 was added when fine-tuning,
+# whereas the original GPT was trained without 50257. So only Russian texts are
+# produced when prompting the model with "<|endoftext|>". So for our Murakami
+# chapters, we should make sure we we wrap them chapters with 50257.
+#
+# Generation pipeline reads `model.generation_config` for default values, and
+# we pass `eos_token_id` and `pad_token_id` to override those. Annoyingly, it also
+# prints the broken `model.generation_config` to stdout, which we can't avoid.
+# Modifying `model.generation_config` also doesn't work, as it gets re-set
+# by `pipeline` on every run. So we'll have to deal with misleading messages.
+#
+generator = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    eos_token_id=tokenizer.eos_token_id,
+    pad_token_id=tokenizer.pad_token_id,
+    device=training_args.device,
+    top_k=50,
+    top_p=0.95,
+    do_sample=True,
+    num_return_sequences=1,
+    max_length=200,
+)
+
+
+class MyCallback(TrainerCallback):
+    def on_evaluate(self, args, state, control, **kwargs):
+        if metrics := kwargs.get("metrics"):
+            loss = metrics["eval_loss"]
+            print(f'Eval loss: {loss:.4f}')
+            print(f'Perplexity: {math.exp(loss):.2f}')
+        if state.best_metric:
+            print(f"Best loss so far: {state.best_metric:.4f}")
+
+        for result in generator([tokenizer.bos_token])[0]:
+            print(result["generated_text"])
+
 
 trainer = Trainer(
     model=model,
@@ -230,12 +245,11 @@ trainer = Trainer(
     callbacks=[MyCallback],
     args=training_args,
 )
+
+# %% TRAIN
 if not dry_run:
     trainer.train(resume_from_checkpoint=get_last_checkpoint(save_dir))
-
     if push_to_hub:
-        # Save and push to hub
-        trainer.save_model()
-
-
-repo.push_to_hub(commit_message="End of training 3 epochs")
+        # TODO figure out exact commands to go here
+        trainer.save_model()  # does it save state?
+        trainer.push_to_hub(commit_message="End of training 3 epochs")
