@@ -7,9 +7,10 @@ References used:
 """
 
 import os
+import math
 from pathlib import Path
 
-import datasets, transformers, evaluate
+import datasets, transformers
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -154,7 +155,9 @@ def sample(num_return_sequences=1, max_length=200):
 class MyCallback(TrainerCallback):
     def on_evaluate(self, args, state, control, **kwargs):
         if metrics := kwargs.get("metrics"):
-            print(f'Eval loss so far: {metrics["eval_loss"]:.4f}')
+            loss = metrics["eval_loss"]
+            print(f'Eval loss: {loss:.4f}')
+            print(f'Perplexity: {math.exp(loss):.2f}')
         if state.best_metric:
             print(f"Best loss so far: {state.best_metric:.4f}")
         sample()
@@ -176,6 +179,7 @@ if transformers.utils.is_torch_cuda_available():
         logging_strategy="steps",
         logging_steps=50,
         save_total_limit=2,
+        load_best_model_at_end=True,
         lr_scheduler_type="cosine",
         warmup_steps=100,
         per_device_train_batch_size=8,
