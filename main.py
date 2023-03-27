@@ -24,7 +24,6 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from datasets import load_dataset
-from huggingface_hub import HfApi
 import coloredlogs
 
 coloredlogs.install(level="info")
@@ -32,9 +31,9 @@ datasets.logging.set_verbosity_info()
 transformers.logging.set_verbosity_info()
 
 use_peft = False
-dry_run = True
+dry_run = False
 push_to_hub = True
-from_base_model = True
+from_base_model = False
 
 base_model_name = "sberbank-ai/rugpt3small_based_on_gpt2"
 model_name = "vldsavelyev/murakami_rugpt3small"
@@ -42,10 +41,10 @@ dataset_name = "vldsavelyev/murakami"
 if use_peft:
     model_name += "_peft"
 
-token = os.getenv("HF_TOKEN")
+token = os.getenv("HUB_TOKEN")
 if push_to_hub and not token:
     raise ValueError(
-        "push_to_hub is set to True, but HF_TOKEN environment variable is not set"
+        "push_to_hub is set to True, but HUB_TOKEN environment variable is not set"
     )
 
 if from_base_model:
@@ -54,21 +53,22 @@ if from_base_model:
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     # * Adjusting tokenizer and generation config*
     #
-    # Some examples might be shorter than the context length, so we will need to pad
-    # them with DataCollatorForLanguageModeling. Since GPT2 was trained on sequences of the
-    # same size, it didn't do any padding, and doesn't specify `pad_token` and `padding_side`
-    # in the config. So we need to set them manually.
+    # Some examples might be shorter than the context length, so we will pad them 
+    # with DataCollatorForLanguageModeling. Since GPT2 was trained on sequences of 
+    # identical size, it didn't do any padding, and didn't bother setting `pad_token` 
+    # and `padding_side` in the model config. So we need to set them manually.
     #
-    # Note that the default value for `padding_side` is right, which won't work well
-    # for next-token prediction objective of GPT, so we set it to left.
+    # Note that the default value for `padding_side` is "right", which won't work 
+    # well for next-token prediction objective of GPT, so we change it to "left".
     #
-    # Also note that the exact value for `pad_token` doesn't matter because it will be
-    # masked anyway in the `attention_mask`. It's usually set identical to `eos_token` in
-    # GPT, however I set it to a different value (`<pad>` which has the value of 0) to
-    # avoid stupid warning here:
+    # Also note that the exact value for `pad_token` doesn't matter because it will 
+    # be masked anyway in the `attention_mask`. It's often recommended to set 
+    # identical to `eos_token` in GPT, however I set it to a different value 
+    # (`<pad>` which has the value of 0) to avoid this stupid warning here:
     # https://github.com/huggingface/transformers/blob/main/src/transformers/generation/utils.py#L1264-L1273
-    # that assumes you had left padding, even when you actually had right padding, because
-    # your padding token is the same as your `eos_token` in the end of a senstence.
+    # that assumes you had left padding, even when you actually had right padding,
+    # because your padding token is the same as your `eos_token` in the end of 
+    # a senstence.
     #
     tokenizer.pad_token = '<pad>'
     tokenizer.padding_side = 'left'
@@ -182,6 +182,7 @@ else:
     # For debugging on a CPU.
     training_args = TrainingArguments(
         output_dir=save_dir,
+        report_to=[],
         evaluation_strategy="steps",
         eval_steps=1,
         logging_steps=1,
@@ -192,13 +193,22 @@ else:
 
 # %% GENERATION
 
-# Model's config has 50256 for `bos_token_id` and `eos_token_id`, even though
-# tokenizer has 50257 ("<|endoftext|>") which is added as a special token
-# in the end. For 50256, the tokenizer has a standard Russian word, because it
-# was completely rebuilt for the fine-tuning. 50257 was added when fine-tuning,
-# whereas the original GPT was trained without 50257. So only Russian texts are
-# produced when prompting the model with "<|endoftext|>". So for our Murakami
-# chapters, we should make sure we we wrap them chapters with 50257.
+# Model's config has `bos_token_id=eos_token_id=50256`, even though the
+# tokenizer has bos_token_id=eos_token_id=50257 ("<|endoftext|>") (for 50256, 
+# the tokenizer has just a standard Russian word). That's because the tokenizer
+# was completely rebuilt during fine-tuning. The original GPT2 tokenizer didn't
+# have other special tokens apart from '<|endoftext|>' (50256), but the rebuilt
+# first has first 5 tokens corresponding to default BPE special tokens 
+# "<pad>", "<s>", "</s>", "<unk>", "<mask>", which are not used at all, and then
+# a special token "<|endoftext|> (50257) added in the end, which was actually used.
+# That looks like a bug on their side: when they used a pre-trained GPT2, they
+# should have preserved the tokenizer. That resulted in the side-effect that only 
+# Russian texts are produced when prompting the model with "<|endoftext|>", whereas
+# when prompting with any English letters, you can get English texts. Perhaps
+# it was a desired side-effect for Sberbank, but just looks inefficient.
+#
+# So for our Murakami chapters, we should make sure we we wrap them chapters 
+# with 50257.
 #
 # Generation pipeline reads `model.generation_config` for default values, and
 # we pass `eos_token_id` and `pad_token_id` to override those. Annoyingly, it also

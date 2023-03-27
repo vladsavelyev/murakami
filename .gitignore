@@ -1,5 +1,3 @@
-data
 .vscode
-saves
-huggingface-hub/
+*.code-workspace
 wandb
